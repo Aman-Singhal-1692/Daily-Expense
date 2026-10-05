@@ -113,6 +113,21 @@ input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid 
 .shop-h .shop-name{font:600 15px var(--display)}
 .shop-h .btn{min-height:34px;padding:6px 12px;font-size:13px}
 .hint{font-size:12px;color:var(--muted);margin:0}
+.shop-h:last-child{border-bottom:0}
+.shop-t{display:flex;align-items:center;gap:8px;flex:1;min-width:0;background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;text-align:left;cursor:pointer;border-radius:6px}
+.shop-t svg{width:16px;height:16px;flex:0 0 auto;color:var(--muted)}
+.shop-t[aria-expanded="false"] svg{transform:rotate(-90deg)}
+.shop-t:disabled{cursor:default}
+.shop-t:disabled svg{visibility:hidden}
+.search-row{display:flex;gap:8px;align-items:center}
+.search-row .search{flex:1;min-width:0}
+.search-row .btn{white-space:nowrap}
+.search{position:relative}
+.search svg.lens{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--muted);pointer-events:none}
+.search input{padding-left:36px;padding-right:40px;background:var(--surface);min-height:42px}
+.search input::-webkit-search-cancel-button{display:none}
+.search .x{position:absolute;right:5px;top:50%;transform:translateY(-50%)}
+mark{background:var(--accent-soft);color:inherit;border-radius:3px;padding:0 1px}
 .bill{background:var(--bg);border:1px solid var(--line);border-radius:8px;max-height:180px;overflow:auto}
 .bill div{display:flex;justify-content:space-between;gap:10px;padding:7px 10px;border-bottom:1px solid var(--line);font-size:14px}
 .bill div:last-child{border-bottom:0}
@@ -206,7 +221,15 @@ section[hidden]{display:none!important}
         </div>
         <button class="btn ghost danger" id="clearBought" type="button">Clear bought</button>
       </div>
-      <p class="hint">Tick items as you pick them up. When you pay, tap <b>Pay bill</b> on that shop and enter the total once.</p>
+      <div class="search-row">
+      <div class="search">
+        <svg class="lens" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+        <input id="listSearch" type="search" placeholder="Search item or shop" aria-label="Search item or shop" autocomplete="off" enterkeyhint="search">
+        <button class="x" id="searchClear" type="button" aria-label="Clear search" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <button class="btn" id="foldAll" type="button" hidden>Hide all</button>
+      </div>
+      <p class="hint">Tick items as you pick them up. When you pay, tap <b>Pay bill</b> on that shop and enter the total once. Tap a shop name to hide or show its items.</p>
       <div class="list" id="itemList"></div>
     </div>
   </section>
@@ -516,7 +539,11 @@ function stamp(){
 }
 takeSnap();
 
-let listFilter='pending', day=today(), month=today().slice(0,7);
+let folded=new Set();
+try{ folded=new Set(JSON.parse(localStorage.getItem(KEY+'-folded')||'[]')); }catch(e){}
+const saveFolded=()=>{ try{ localStorage.setItem(KEY+'-folded',JSON.stringify([...folded])); }catch(e){} };
+let shownShops=[];
+let listSearch='', listFilter='pending', day=today(), month=today().slice(0,7);
 
 /* ---------- helpers ---------- */
 function fillCats(sel){ sel.innerHTML = CATS.map(c=>`<option>${c}</option>`).join(''); }
@@ -546,24 +573,50 @@ function renderStrip(){
 function renderItems(){
   renderShopList();
   const el=$('#itemList');
-  let items=S.items.filter(i=>listFilter==='all'||(listFilter==='bought'?i.state==='bought':i.state!=='bought'));
+  const inTab=i=>listFilter==='all'||(listFilter==='bought'?i.state==='bought':i.state!=='bought');
+  const words=listSearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const matches=i=>{ const hay=(i.name+' '+shopOf(i)).toLowerCase(); return words.every(w=>hay.includes(w)); };
+  const hl=t=>{ if(!words.length) return esc(t);
+    const re=new RegExp('('+words.map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')','ig');
+    return String(t??'').split(re).map((p,n)=>n%2?`<mark>${esc(p)}</mark>`:esc(p)).join(''); };
+  $('#searchClear').hidden=!words.length;
+  shownShops=[]; $('#foldAll').hidden=true;
+  let items=S.items.filter(inTab);
+  if(words.length){
+    items=items.filter(matches);
+    if(!items.length){
+      const other=S.items.filter(matches).length;
+      const tab=listFilter==='bought'?'Bought':listFilter==='pending'?'To buy':'your list';
+      el.innerHTML=`<div class="empty">No item or shop matches “${esc(listSearch.trim())}” in ${tab}.${other?` <button class="btn" type="button" data-showall style="margin-left:6px">Show ${other} in All</button>`:''}</div>`;
+      return;
+    }
+  }
   if(!items.length){ el.innerHTML=`<div class="empty">${listFilter==='bought'?'Nothing bought yet.':'Your list is empty. Add what you need above.'}</div>`; return; }
   const groups={}, order=[];
   items.forEach(i=>{ const s=shopOf(i); if(!groups[s]){ groups[s]=[]; order.push(s); } groups[s].push(i); });
   order.sort((a,b)=>(a===NO_SHOP)-(b===NO_SHOP) || a.localeCompare(b));
+  const searching=words.length>0;
+  shownShops=order;
+  const fa=$('#foldAll'); fa.hidden=searching;
+  fa.textContent = order.every(s=>folded.has(s)) ? 'Show all' : 'Hide all';
+  const CHEV='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
   el.innerHTML = order.map(s=>{
     const g=groups[s];
-    const picked=g.filter(i=>i.state==='picked');
-    const open=g.filter(i=>i.state!=='bought');
-    const info = picked.length ? `${picked.length} of ${open.length} picked` : (open.length ? `${open.length} to buy · ${money(open.reduce((a,i)=>a+(+i.price||0),0))}` : `${g.length} bought`);
-    return `<div class="shop-h"><div><div class="shop-name">${esc(s)}</div><div class="meta num" style="font-size:12px;color:var(--muted)">${info}</div></div>
+    const isFolded=!searching && folded.has(s);
+    const src=words.length ? S.items.filter(i=>shopOf(i)===s&&inTab(i)) : g;
+    const open=src.filter(i=>i.state!=='bought');
+    const pickedAll=open.filter(i=>i.state==='picked');
+    const picked=g.some(i=>i.state==='picked') ? pickedAll : [];
+    let info = pickedAll.length ? `${pickedAll.length} of ${open.length} picked` : (open.length ? `${open.length} to buy · ${money(open.reduce((a,i)=>a+(+i.price||0),0))}` : `${src.length} bought`);
+    if(words.length && g.length<src.length) info = `Showing ${g.length} of ${src.length} · ` + info;
+    return `<div class="shop-h"><button class="shop-t" type="button" data-fold="${esc(s)}" aria-expanded="${!isFolded}"${searching?' disabled':''} title="${isFolded?'Show items':'Hide items'}">${CHEV}<span><span class="shop-name" style="display:block">${hl(s)}</span><span class="meta num" style="display:block;font-size:12px;color:var(--muted)">${info}</span></span></button>
         ${picked.length?`<button class="btn pri" type="button" data-pay="${esc(s)}">Pay bill · ${picked.length}</button>`:''}</div>`+
-      g.map(i=>{
+      (isFolded?[]:g).map(i=>{
         const cls=i.state==='bought'?' done':i.state==='picked'?' picked':'';
         const lbl=i.state==='pending'?'Mark as picked':i.state==='picked'?'Unpick':'Move back to list';
         return `<div class="item${cls}" data-id="${esc(i.id)}">
         <button class="check" type="button" data-act="toggle" aria-label="${lbl}: ${esc(i.name)}">${TICK}</button>
-        <div><div class="name">${esc(i.name)}</div><div class="meta">${+i.qty||''} ${esc(i.unit)}${i.state==='picked'?' · in cart':''}${i.purchaseId?' · paid':''}</div></div>
+        <div><div class="name">${hl(i.name)}</div><div class="meta">${+i.qty||''} ${esc(i.unit)}${i.state==='picked'?' · in cart':''}${i.purchaseId?' · paid':''}</div></div>
         <span class="amt">${i.price?money(i.price):'—'}</span>
         <button class="x" type="button" data-act="del" aria-label="Delete ${esc(i.name)}">${X}</button></div>`;}).join('');
   }).join('');
@@ -690,9 +743,19 @@ $('#itemForm').addEventListener('submit',ev=>{
   const shop=$('#iShop').value.trim();
   S.items.unshift({id:uid(),name,qty:+$('#iQty').value||0,unit:$('#iUnit').value,price:+$('#iPrice').value||0,shop,state:'pending'});
   $('#iName').value=''; $('#iPrice').value=''; $('#iQty').value=1; $('#iName').focus();
-  listFilter='pending'; syncChips(); commit();
+  if(folded.delete(shop||NO_SHOP)) saveFolded();
+  listFilter='pending'; listSearch=''; $('#listSearch').value=''; syncChips(); commit();
 });
+$('#listSearch').addEventListener('input',e=>{ listSearch=e.target.value; renderItems(); });
+$('#foldAll').addEventListener('click',()=>{
+  if(shownShops.every(s=>folded.has(s))) shownShops.forEach(s=>folded.delete(s)); else shownShops.forEach(s=>folded.add(s));
+  saveFolded(); renderItems();
+});
+$('#searchClear').addEventListener('click',()=>{ listSearch=''; const i=$('#listSearch'); i.value=''; i.focus(); renderItems(); });
 $('#itemList').addEventListener('click',ev=>{
+  if(ev.target.closest('[data-showall]')){ listFilter='all'; syncChips(); renderItems(); return; }
+  const fold=ev.target.closest('button[data-fold]');
+  if(fold){ const s=fold.dataset.fold; if(!folded.delete(s)) folded.add(s); saveFolded(); renderItems(); return; }
   const pay=ev.target.closest('button[data-pay]'); if(pay){ payBill(pay.dataset.pay); return; }
   const b=ev.target.closest('button[data-act]'); if(!b) return;
   const id=b.closest('.item').dataset.id, item=S.items.find(i=>i.id===id); if(!item) return;
