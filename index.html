@@ -122,6 +122,11 @@ input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid 
 .search-row{display:flex;gap:8px;align-items:center}
 .search-row .search{flex:1;min-width:0}
 .search-row .btn{white-space:nowrap}
+.item-note{font-size:12px;margin:2px 0 0;color:var(--muted);line-height:1.4}
+.item-note.dup{color:var(--warn);font-weight:600}
+.dup-list{background:var(--bg);border:1px solid var(--line);border-radius:8px}
+.dup-list div{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border-bottom:1px solid var(--line);font-size:14px}
+.dup-list div:last-child{border-bottom:0}
 .search{position:relative}
 .search svg.lens{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--muted);pointer-events:none}
 .search input{padding-left:36px;padding-right:40px;background:var(--surface);min-height:42px}
@@ -205,7 +210,7 @@ section[hidden]{display:none!important}
   <section id="tab-list">
     <div class="wrap" style="gap:14px">
       <form class="add" id="itemForm" autocomplete="off">
-        <div class="f span6"><label class="l" for="iName">Item</label><input id="iName" placeholder="e.g. Tomatoes" required></div>
+        <div class="f span6"><label class="l" for="iName">Item</label><input id="iName" list="itemNames" placeholder="e.g. Tomatoes" required><datalist id="itemNames"></datalist><p class="item-note" id="iNote" role="status" hidden></p></div>
         <div class="f span2 m-span3"><label class="l" for="iQty">Qty</label><input id="iQty" type="number" min="0" step="any" value="1" inputmode="decimal"></div>
         <div class="f span2 m-span3"><label class="l" for="iUnit">Unit</label>
           <select id="iUnit"><option>kg</option><option>g</option><option>L</option><option>ml</option><option selected>pcs</option><option>dozen</option><option>packet</option><option>bundle</option></select></div>
@@ -552,7 +557,27 @@ const DEFAULT_SHOPS=['Kirana store','Sabzi wala','Dairy','Medical store','Superm
 const NO_SHOP='Any shop';
 const shopOf = i => String(i.shop||'').trim() || NO_SHOP;
 function allShops(){ const set=new Set(); S.items.forEach(i=>{ if(i.shop) set.add(String(i.shop).trim()); }); Object.keys(S.shopCat||{}).forEach(s=>set.add(s)); DEFAULT_SHOPS.forEach(s=>set.add(s)); return [...set]; }
-function renderShopList(){ $('#shopList').innerHTML = allShops().map(s=>`<option value="${esc(s)}"></option>`).join(''); }
+/* item memory: last shop / unit / price used for each item name (kept per device, plus whatever is in the synced list) */
+const norm = s => String(s??'').toLowerCase().replace(/\s+/g,' ').trim();
+let hist={}; try{ hist=JSON.parse(localStorage.getItem(KEY+'-hist')||'{}')||{}; }catch(e){}
+const saveHist=()=>{ try{ localStorage.setItem(KEY+'-hist',JSON.stringify(hist)); }catch(e){} };
+function remember(i){
+  const k=norm(i.name); if(!k) return false;
+  const t=+i.u||0, cur=hist[k];
+  if(cur && cur.t>t) return false;
+  const rec={name:String(i.name).trim(),shop:String(i.shop||'').trim(),unit:i.unit||'pcs',qty:+i.qty||0,price:+i.price||0,t};
+  if(cur && JSON.stringify(cur)===JSON.stringify(rec)) return false;
+  hist[k]=rec; return true;
+}
+const lastFor = name => hist[norm(name)] || null;
+const openDups = name => { const k=norm(name); return k ? S.items.filter(i=>i.state!=='bought' && norm(i.name)===k) : []; };
+const lastBought = name => { const k=norm(name); if(!k) return null;
+  return S.items.filter(i=>i.state==='bought' && norm(i.name)===k).sort((a,b)=>(+b.u||0)-(+a.u||0))[0] || null; };
+function renderShopList(){
+  $('#shopList').innerHTML = allShops().map(s=>`<option value="${esc(s)}"></option>`).join('');
+  let changed=false; S.items.forEach(i=>{ if(remember(i)) changed=true; }); if(changed) saveHist();
+  $('#itemNames').innerHTML = Object.values(hist).sort((a,b)=>a.name.localeCompare(b.name)).map(h=>`<option value="${esc(h.name)}"></option>`).join('');
+}
 let toastT;
 function toast(msg){ let t=$('.toast'); if(!t){ t=document.createElement('div'); t.className='toast'; t.setAttribute('role','status'); document.body.appendChild(t); }
   t.textContent=msg; t.hidden=false; clearTimeout(toastT); toastT=setTimeout(()=>t.hidden=true,2600); }
@@ -737,14 +762,80 @@ function payBill(shop){
 function commit(){ const changed=stamp(); save(); render(); if(changed) scheduleSync(); }
 
 /* ---------- events ---------- */
+/* item form: auto-fill from last time, warn about duplicates */
+const touched={shop:false,unit:false,price:false}, auto={shop:false,unit:false,price:false};
+['shop','unit','price'].forEach(f=>{ const el=$('#i'+f[0].toUpperCase()+f.slice(1)); ['input','change'].forEach(t=>el.addEventListener(t,()=>{ touched[f]=true; auto[f]=false; })); });
+const stateLabel = i => i.state==='picked'?'in cart':'to buy';
+const descItem = i => [shopOf(i), (+i.qty||'')+' '+(i.unit||''), stateLabel(i)].map(x=>String(x).trim()).filter(Boolean).join(' · ');
+function onNameInput(){
+  const name=$('#iName').value, note=$('#iNote');
+  const last=lastFor(name), dups=openDups(name);
+  const fShop=$('#iShop'), fUnit=$('#iUnit'), fPrice=$('#iPrice');
+  if(last){
+    if(!touched.shop && last.shop){ fShop.value=last.shop; auto.shop=true; }
+    if(!touched.unit && last.unit && [...fUnit.options].some(o=>o.value===last.unit)){ fUnit.value=last.unit; auto.unit=true; }
+    if(!touched.price && last.price){ fPrice.value=last.price; auto.price=true; }
+  } else {
+    if(auto.shop){ fShop.value=''; auto.shop=false; }
+    if(auto.unit){ fUnit.value='pcs'; auto.unit=false; }
+    if(auto.price){ fPrice.value=''; auto.price=false; }
+  }
+  if(dups.length){
+    note.className='item-note dup';
+    note.textContent = `Already on your list: ${dups.map(descItem).join('; ')}`;
+    note.hidden=false;
+  } else if(lastBought(name)){
+    const b=lastBought(name);
+    note.className='item-note';
+    note.textContent = `Bought before at ${shopOf(b)}. Adding it will move it back to To buy.`;
+    note.hidden=false;
+  } else if(last){
+    note.className='item-note';
+    note.textContent = `Filled in from last time${last.shop?`: ${last.shop}`:''}${last.price?` · ${money(last.price)}`:''}`;
+    note.hidden=false;
+  } else note.hidden=true;
+}
+$('#iName').addEventListener('input',onNameInput);
+
+function addItem(rec){
+  const old=lastBought(rec.name);
+  if(old){
+    // re-use the bought entry instead of adding a second one
+    Object.assign(old,{qty:rec.qty,unit:rec.unit,price:rec.price||+old.price||0,shop:rec.shop,state:'pending'});
+    delete old.purchaseId;
+    S.items=[old,...S.items.filter(i=>i!==old)];
+    toast(`${old.name} moved back to To buy`);
+  } else S.items.unshift({id:uid(),...rec,state:'pending'});
+  $('#iName').value=''; $('#iPrice').value=''; $('#iQty').value=1; $('#iNote').hidden=true; $('#iName').focus();
+  Object.keys(touched).forEach(k=>{ touched[k]=false; auto[k]=false; });
+  if(folded.delete(rec.shop||NO_SHOP)) saveFolded();
+  listFilter='pending'; listSearch=''; $('#listSearch').value=''; syncChips(); commit();
+}
 $('#itemForm').addEventListener('submit',ev=>{
   ev.preventDefault();
   const name=$('#iName').value.trim(); if(!name) return;
-  const shop=$('#iShop').value.trim();
-  S.items.unshift({id:uid(),name,qty:+$('#iQty').value||0,unit:$('#iUnit').value,price:+$('#iPrice').value||0,shop,state:'pending'});
-  $('#iName').value=''; $('#iPrice').value=''; $('#iQty').value=1; $('#iName').focus();
-  if(folded.delete(shop||NO_SHOP)) saveFolded();
-  listFilter='pending'; listSearch=''; $('#listSearch').value=''; syncChips(); commit();
+  const rec={name,qty:+$('#iQty').value||0,unit:$('#iUnit').value,price:+$('#iPrice').value||0,shop:$('#iShop').value.trim()};
+  const dups=openDups(name);
+  if(!dups.length){ addItem(rec); return; }
+  const same=dups.length===1 && dups[0].unit===rec.unit && rec.qty>0 && shopOf(dups[0])===(rec.shop||NO_SHOP) ? dups[0] : null;
+  const {back,close}=openSheet(`<div class="sheet" role="dialog" aria-label="Item already on list">
+    <div><h2>${esc(dups[0].name)} is already on your list</h2><p class="hint">You are adding ${rec.qty||''} ${esc(rec.unit)}${rec.shop?` at ${esc(rec.shop)}`:''}.</p></div>
+    <div class="dup-list">${dups.map(i=>`<div><span>${esc(shopOf(i))}</span><span class="num">${+i.qty||''} ${esc(i.unit)} · ${stateLabel(i)}</span></div>`).join('')}</div>
+    <div class="row" style="justify-content:flex-end">
+      <button class="btn ghost" type="button" data-a="cancel">Cancel</button>
+      <button class="btn${same?'':' pri'}" type="button" data-a="again">Add separately</button>
+      ${same?`<button class="btn pri" type="button" data-a="merge">Make it ${(+same.qty||0)+rec.qty} ${esc(rec.unit)}</button>`:''}
+    </div></div>`);
+  back.querySelector(same?'[data-a="merge"]':'[data-a="again"]').focus();
+  back.querySelector('[data-a="again"]').addEventListener('click',()=>{ close(); addItem(rec); });
+  if(same) back.querySelector('[data-a="merge"]').addEventListener('click',()=>{
+    same.qty=(+same.qty||0)+rec.qty;
+    if(rec.price) same.price=(+same.price||0)+rec.price;
+    close();
+    $('#iName').value=''; $('#iPrice').value=''; $('#iQty').value=1; $('#iNote').hidden=true;
+    Object.keys(touched).forEach(k=>{ touched[k]=false; auto[k]=false; });
+    commit(); toast(`${same.name} is now ${same.qty} ${same.unit}`);
+  });
 });
 $('#listSearch').addEventListener('input',e=>{ listSearch=e.target.value; renderItems(); });
 $('#foldAll').addEventListener('click',()=>{
